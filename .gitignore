@@ -30,6 +30,9 @@ coverage.xml
 .env
 .env.*
 !.env.example
+google-credentials.json
+*-service-account*.json
+google-sheet.json
 
 # Editors
 .idea/

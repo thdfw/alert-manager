@@ -1,16 +1,27 @@
 [project]
 name = "alert-manager"
 version = "0.1.0"
-description = "GridWorks alert management service."
+description = "Alert management service."
 readme = "README.md"
 authors = [
     { name = "thdfw", email = "th.defauw@gmail.com" }
 ]
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "google-auth>=2.0.0",
+    "gspread>=6.0.0",
+    "pendulum>=3.0.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "python-dotenv>=1.0.0",
+    "requests>=2.32.3",
+]
 
 [project.scripts]
 alert-manager = "alert_manager:main"
+alert-manager-sheet = "alert_manager.google_sheet_reader:main"
 
 [project.urls]
 Homepage = "https://github.com/thdfw/alert-manager"
@@ -42,6 +53,10 @@ python_version = "3.12"
 strict = true
 warn_unreachable = true
 packages = ["alert_manager"]
+
+[[tool.mypy.overrides]]
+module = ["gspread.*", "google.*", "pendulum.*", "requests.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

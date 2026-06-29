@@ -1,0 +1,91 @@
+"""FastAPI service exposing /new-alert and running ack/escalation in the background."""
+
+import asyncio
+import secrets
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from fastapi import Depends, FastAPI, Header, HTTPException
+
+from alert_manager.config import Settings
+from alert_manager.manager import AlertManager
+from alert_manager.models import NewAlert
+
+settings = Settings()
+manager = AlertManager(settings)
+
+
+def require_token(authorization: str | None = Header(default=None)) -> None:
+    """Reject requests without a valid bearer token.
+
+    Expects ``Authorization: Bearer <token>``. If ALERT_MANAGER_API_TOKEN is
+    unset, auth is disabled (open) and a warning is logged at startup.
+    """
+    expected = settings.api_token.get_secret_value()
+    if not expected:
+        return
+    scheme, _, token = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not secrets.compare_digest(token, expected):
+        raise HTTPException(
+            status_code=401, detail="Invalid or missing bearer token"
+        )
+
+
+async def _background_loop() -> None:
+    """Re-check acks and escalate unacknowledged alerts every check interval."""
+    while True:
+        await asyncio.sleep(settings.check_interval_seconds)
+        try:
+            await asyncio.to_thread(manager.check_telegram_alerts)
+        except Exception as e:
+            print(f"Error in alert check loop: {e}")
+
+
+async def _ban_cleanup_loop() -> None:
+    """Clear banned aliases every ban_clear_interval_seconds (default 24h)."""
+    while True:
+        await asyncio.sleep(settings.ban_clear_interval_seconds)
+        try:
+            await asyncio.to_thread(manager.clear_banned_alerts)
+        except Exception as e:
+            print(f"Error in ban cleanup loop: {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    if not settings.api_token.get_secret_value():
+        print(
+            "WARNING: ALERT_MANAGER_API_TOKEN is not set; /new-alert is unauthenticated"
+        )
+    tasks = [
+        asyncio.create_task(_background_loop()),
+        asyncio.create_task(_ban_cleanup_loop()),
+    ]
+    try:
+        yield
+    finally:
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
+app = FastAPI(title="alert-manager", lifespan=lifespan)
+
+
+@app.get("/health")
+def health() -> dict[str, object]:
+    return {"status": "ok", "active_alerts": len(manager.active_telegram_alerts)}
+
+
+@app.post("/new-alert")
+async def new_alert(
+    alert: NewAlert, _: None = Depends(require_token)
+) -> dict[str, str]:
+    await asyncio.to_thread(
+        manager.send_alert, alert.message, alert.site_alias, alert.alert_alias
+    )
+    return {"status": "ok"}
