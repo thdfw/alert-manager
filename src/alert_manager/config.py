@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     timezone: str = "America/New_York"
     max_alert_count: int = 6
     escalate_after_count: int = 3
-    check_interval_seconds: int = 1 * 60
+    check_interval_seconds: int = 5 * 60
     ban_clear_interval_seconds: int = 24 * 60 * 60
     host: str = "0.0.0.0"
     port: int = 8000
