@@ -19,6 +19,7 @@ class AlertManager:
         self.timezone_str = settings.timezone
         self.max_alert_count = settings.max_alert_count
         self.escalate_after_count = settings.escalate_after_count
+        self.reminder_interval_seconds = settings.reminder_interval_seconds
         self.alert_log = AlertLog(settings.alert_log_file)
         self.active_telegram_alerts: dict[str, Alert] = {}
         # full_aliases a recipient muted with 👎; never re-triggered while listed.
@@ -150,12 +151,11 @@ class AlertManager:
         return recipients
 
     def check_telegram_alerts(self) -> None:
-        print("\nChecking active alerts...")
         with self._lock:
             active = list(self.active_telegram_alerts.items())
-        print(f"There are {len(active)} active alerts.")
         if not active:
-            return
+            return  # nothing to poll; stay quiet so the fast loop is cheap when idle
+        print(f"\nChecking {len(active)} active alert(s)...")
 
         token = self.settings.telegram_bot_token.get_secret_value()
         url = f"https://api.telegram.org/bot{token}/getUpdates"
@@ -214,12 +214,19 @@ class AlertManager:
                     "acknowledged",
                 )
             else:
-                self.send_alert(
-                    alert.message,
-                    alert.site_alias,
-                    alert.alert_alias,
-                    reminder=True,
+                # Acks are checked every loop, but reminders are rate-limited:
+                # only re-send once reminder_interval_seconds has passed since the
+                # last send (or since the alert was first received).
+                last_activity = (
+                    alert.sends[-1].sent_at if alert.sends else alert.time_received
                 )
+                if int(time.time()) - last_activity >= self.reminder_interval_seconds:
+                    self.send_alert(
+                        alert.message,
+                        alert.site_alias,
+                        alert.alert_alias,
+                        reminder=True,
+                    )
 
     def alerts_history(self, start: int, end: int) -> list[AlertRecord]:
         """Logged alerts whose time_received falls within [start, end]."""

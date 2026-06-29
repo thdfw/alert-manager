@@ -50,11 +50,13 @@ Returns `{"status": "ok", "active_alerts": <n>}`. No auth.
 
 **Recipients.** The on-call schedule and contacts live in a Google Sheet (`Schedule` and `Contacts` worksheets), cached locally to `google-sheet.json` and refreshed on each send. The recipient is whoever is on call for the current weekday and hour.
 
-**Tracking and escalation.** A background loop runs every `ALERT_MANAGER_CHECK_INTERVAL_SECONDS` (default 5 min). For each alert that has not been acknowledged it re-sends and bumps a per-alert counter:
+**Tracking and escalation.** While any alert is active, a background loop runs every `ALERT_MANAGER_CHECK_INTERVAL_SECONDS` (default 30s) to check for acknowledgements quickly. Re-sending is separate and slower: an unacknowledged alert is only re-sent once `ALERT_MANAGER_REMINDER_INTERVAL_SECONDS` (default 5 min) has passed since its last send. Each re-send bumps a per-alert counter:
 
 - counts 1–`ALERT_MANAGER_ESCALATE_AFTER_COUNT` (default 3): on-call recipient only,
 - above that: escalates to **all** contacts,
 - stops after `ALERT_MANAGER_MAX_ALERT_COUNT` (default 6) sends (the alert stays tracked so a late acknowledgement is still honored).
+
+When no alerts are active the loop still ticks but does nothing (no Telegram calls), so the fast interval is cheap.
 
 **Acknowledgement (👍).** An alert is acknowledged when a recipient reacts with 👍 to the alert message. Acknowledged alerts are dropped.
 
@@ -77,7 +79,8 @@ Copy `.env.example` to `.env` and fill it in. All variables use the `ALERT_MANAG
 | `ALERT_MANAGER_SCHEDULE_FILE` | `google-sheet.json` | Local cache of the schedule/contacts |
 | `ALERT_MANAGER_ALERT_LOG_FILE` | `alerts.csv` | CSV log of every alert and its state |
 | `ALERT_MANAGER_TIMEZONE` | `America/New_York` | Timezone for the date in alias keys and on-call lookup |
-| `ALERT_MANAGER_CHECK_INTERVAL_SECONDS` | `300` | Ack/escalation check interval |
+| `ALERT_MANAGER_CHECK_INTERVAL_SECONDS` | `30` | How often active alerts are checked for acknowledgement |
+| `ALERT_MANAGER_REMINDER_INTERVAL_SECONDS` | `300` | Minimum time between re-sends of an unacknowledged alert |
 | `ALERT_MANAGER_MAX_ALERT_COUNT` | `6` | Max sends per alert |
 | `ALERT_MANAGER_ESCALATE_AFTER_COUNT` | `3` | Escalate to all contacts once the count exceeds this |
 | `ALERT_MANAGER_BAN_CLEAR_INTERVAL_SECONDS` | `86400` | How often the 👎-ban list is cleared |

@@ -175,6 +175,7 @@ def test_non_thumbs_up_reaction_does_not_acknowledge(
     m = _build_manager(
         tmp_path, {"OnCall": "111"}, _full_schedule("OnCall"), monkeypatch
     )
+    m.reminder_interval_seconds = 0  # don't rate-limit the re-send for this test
     m.send_alert("zone cold", "beech", "no_data")
     send = next(iter(m.active_telegram_alerts.values())).sends[0]
     chat_id, message_id = next(iter(send.message_ids.items()))
@@ -189,6 +190,30 @@ def test_non_thumbs_up_reaction_does_not_acknowledge(
     assert len(m.active_telegram_alerts) == 1  # still active
     assert next(iter(m.active_telegram_alerts.values())).count == 2  # re-sent
     assert len(posts) == 2  # initial send + one re-send
+
+
+def test_reminder_is_rate_limited_within_interval(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    posts: list[dict[str, Any]] = []
+    monkeypatch.setattr(manager_module.requests, "post", _recording_post(posts))
+    monkeypatch.setattr(
+        manager_module.requests,
+        "get",
+        lambda url, params: FakeResponse(200, {"result": []}),
+    )
+    m = _build_manager(
+        tmp_path, {"OnCall": "111"}, _full_schedule("OnCall"), monkeypatch
+    )
+    m.reminder_interval_seconds = 300  # default cadence
+    m.send_alert("zone cold", "beech", "no_data")
+
+    # A check moments later (no reaction) detects acks but must NOT re-send yet.
+    m.check_telegram_alerts()
+
+    assert len(m.active_telegram_alerts) == 1
+    assert next(iter(m.active_telegram_alerts.values())).count == 1  # no reminder
+    assert len(posts) == 1  # only the initial send
 
 
 def test_thumbs_up_on_different_message_does_not_acknowledge(
