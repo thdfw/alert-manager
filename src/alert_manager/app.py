@@ -9,7 +9,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 
 from alert_manager.config import Settings
 from alert_manager.manager import AlertManager
-from alert_manager.models import NewAlert
+from alert_manager.models import AlertRecord, NewAlert
 
 settings = Settings()
 manager = AlertManager(settings)
@@ -89,3 +89,10 @@ async def new_alert(
         manager.send_alert, alert.message, alert.site_alias, alert.alert_alias
     )
     return {"status": "ok"}
+
+
+@app.get("/alerts-history")
+def alerts_history(
+    start: int, end: int, _: None = Depends(require_token)
+) -> list[AlertRecord]:
+    return manager.alerts_history(start, end)

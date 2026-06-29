@@ -33,6 +33,7 @@ coverage.xml
 google-credentials.json
 *-service-account*.json
 google-sheet.json
+alerts.csv
 
 # Editors
 .idea/

@@ -20,6 +20,28 @@ curl -X POST http://localhost:8000/new-alert \
 - Sends the alert to the current on-call recipient(s) and starts tracking it.
 - Returns `{"status": "ok"}`.
 
+### `GET /alerts-history`
+
+Returns the logged alerts from a time window, read from the CSV audit log. Use it to review what fired and whether it was acknowledged or muted.
+
+Query parameters (both required):
+
+- `start` — start of the window, unix time in seconds (inclusive).
+- `end` — end of the window, unix time in seconds (inclusive).
+
+It returns a JSON array of alerts whose `time_received` falls within `[start, end]`, oldest first. Each entry has `time_received`, `alert_alias`, `site_alias`, `message`, and `state` (`notified`, `acknowledged`, or `muted`). The window is matched against `time_received`, so an alert is included based on when it first arrived, regardless of when it was later acknowledged. Auth is the same bearer token as `/new-alert`; both `start` and `end` are required, so a missing one returns `422`.
+
+Example — all alerts from the last 24 hours (using `date` to build the unix timestamps):
+
+```bash
+curl -H "Authorization: Bearer $ALERT_MANAGER_API_TOKEN" \
+  "http://localhost:8000/alerts-history?start=$(date -d '24 hours ago' +%s)&end=$(date +%s)"
+```
+
+```json
+[{ "time_received": 1735700000, "alert_alias": "no_data", "site_alias": "Site 2", "message": "No data in the last 2 hours", "state": "acknowledged" }]
+```
+
 ### `GET /health`
 
 Returns `{"status": "ok", "active_alerts": <n>}`. No auth.
@@ -40,6 +62,8 @@ Returns `{"status": "ok", "active_alerts": <n>}`. No auth.
 
 **Idempotency.** While an alert is active, a repeat `/new-alert` with the same `site_alias` + `alert_alias` (same day) is ignored. Re-sends and escalation are driven internally, never by repeat posts.
 
+**Audit log.** Every alert is appended as one row to a local CSV (`ALERT_MANAGER_ALERT_LOG_FILE`, default `alerts.csv`) with columns `time_received`, `alert_alias`, `site_alias`, `message`, `state`. The `state` starts at `notified` and is updated to `acknowledged` (👍) or `muted` (👎) when the reaction is read.
+
 ## Configuration
 
 Copy `.env.example` to `.env` and fill it in. All variables use the `ALERT_MANAGER_` prefix.
@@ -51,6 +75,7 @@ Copy `.env.example` to `.env` and fill it in. All variables use the `ALERT_MANAG
 | `ALERT_MANAGER_GOOGLE_SHEETS_SPREADSHEET_ID` | — | Spreadsheet with the `Schedule` and `Contacts` worksheets |
 | `ALERT_MANAGER_GOOGLE_CREDENTIALS_FILE` | `google-credentials.json` | Path to the Google service-account JSON (read-only access to the sheet) |
 | `ALERT_MANAGER_SCHEDULE_FILE` | `google-sheet.json` | Local cache of the schedule/contacts |
+| `ALERT_MANAGER_ALERT_LOG_FILE` | `alerts.csv` | CSV log of every alert and its state |
 | `ALERT_MANAGER_TIMEZONE` | `America/New_York` | Timezone for the date in alias keys and on-call lookup |
 | `ALERT_MANAGER_CHECK_INTERVAL_SECONDS` | `300` | Ack/escalation check interval |
 | `ALERT_MANAGER_MAX_ALERT_COUNT` | `6` | Max sends per alert |

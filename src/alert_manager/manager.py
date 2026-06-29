@@ -7,9 +7,10 @@ import time
 import pendulum
 import requests
 
+from alert_manager.alert_log import AlertLog
 from alert_manager.config import Settings
 from alert_manager.google_sheet_reader import read_google_sheet, schedule_json_path
-from alert_manager.models import Alert, AlertSend
+from alert_manager.models import Alert, AlertRecord, AlertSend
 
 
 class AlertManager:
@@ -18,6 +19,7 @@ class AlertManager:
         self.timezone_str = settings.timezone
         self.max_alert_count = settings.max_alert_count
         self.escalate_after_count = settings.escalate_after_count
+        self.alert_log = AlertLog(settings.alert_log_file)
         self.active_telegram_alerts: dict[str, Alert] = {}
         # full_aliases a recipient muted with 👎; never re-triggered while listed.
         # Entries embed today's date, so the set is cleared every 24h (it would
@@ -36,6 +38,7 @@ class AlertManager:
             f"-{site_alias}-{alert_alias}"
         )
 
+        newly_received = False
         with self._lock:
             # A 👎 banned this alias; never re-trigger it (until the daily clear).
             if full_alias in self.banned_alerts:
@@ -47,17 +50,25 @@ class AlertManager:
                 print(f"Duplicate alert {full_alias} still active; ignoring")
                 return
             if full_alias not in self.active_telegram_alerts:
+                newly_received = True
                 self.active_telegram_alerts[full_alias] = Alert(
                     message=message,
                     site_alias=site_alias,
                     alert_alias=alert_alias,
+                    time_received=int(time.time()),
                 )
             elif self.active_telegram_alerts[full_alias].count < self.max_alert_count:
                 self.active_telegram_alerts[full_alias].count += 1
             else:
                 return
 
-            count = self.active_telegram_alerts[full_alias].count
+            alert = self.active_telegram_alerts[full_alias]
+            count = alert.count
+
+        if newly_received:
+            self.alert_log.record_notified(
+                alert.time_received, alert_alias, site_alias, message
+            )
 
         # Refresh the on-call schedule/contacts cache. A transient Google
         # failure should not drop the alert, so fall back to the cached JSON.
@@ -92,9 +103,9 @@ class AlertManager:
 
         if sent_message_ids:
             with self._lock:
-                alert = self.active_telegram_alerts.get(full_alias)
-                if alert is not None:
-                    alert.sends.append(
+                tracked = self.active_telegram_alerts.get(full_alias)
+                if tracked is not None:
+                    tracked.sends.append(
                         AlertSend(
                             sent_at=int(time.time()), message_ids=sent_message_ids
                         )
@@ -189,10 +200,19 @@ class AlertManager:
                 with self._lock:
                     self.active_telegram_alerts.pop(full_alert_alias, None)
                     self.banned_alerts.add(full_alert_alias)
+                self.alert_log.set_state(
+                    alert.time_received, alert.alert_alias, alert.site_alias, "muted"
+                )
             elif acknowledged:
                 print(f"Telegram alert {full_alert_alias} acknowledged")
                 with self._lock:
                     self.active_telegram_alerts.pop(full_alert_alias, None)
+                self.alert_log.set_state(
+                    alert.time_received,
+                    alert.alert_alias,
+                    alert.site_alias,
+                    "acknowledged",
+                )
             else:
                 self.send_alert(
                     alert.message,
@@ -200,6 +220,10 @@ class AlertManager:
                     alert.alert_alias,
                     reminder=True,
                 )
+
+    def alerts_history(self, start: int, end: int) -> list[AlertRecord]:
+        """Logged alerts whose time_received falls within [start, end]."""
+        return self.alert_log.read_between(start, end)
 
     def clear_banned_alerts(self) -> None:
         """Drop all banned aliases. Run every 24h: full_aliases embed the date,

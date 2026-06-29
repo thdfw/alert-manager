@@ -4,6 +4,7 @@ All Telegram and Google calls are mocked, so these exercise the ported logic
 (``send_alert`` / ``check_telegram_alerts``) without touching the network.
 """
 
+import csv
 import json
 from typing import Any
 
@@ -41,7 +42,9 @@ def _build_manager(
     sheet = tmp_path / "google-sheet.json"
     sheet.write_text(json.dumps({"schedule": schedule, "contacts": contacts}))
     settings = Settings(
-        schedule_file=str(sheet), telegram_bot_token=SecretStr("test-token")
+        schedule_file=str(sheet),
+        alert_log_file=str(tmp_path / "alerts.csv"),
+        telegram_bot_token=SecretStr("test-token"),
     )
     # Don't hit Google on each send; the cached sheet written above is enough.
     monkeypatch.setattr(manager_module, "read_google_sheet", lambda s: None)
@@ -265,3 +268,113 @@ def test_clear_banned_alerts_allows_retrigger(
 
     m.send_alert("zone cold", "beech", "no_data")  # allowed again
     assert len(m.active_telegram_alerts) == 1
+
+
+def _read_log(m: AlertManager) -> list[dict[str, str]]:
+    with m.alert_log.path.open(newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def test_csv_logs_notified_row_once_per_alert(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    posts: list[dict[str, Any]] = []
+    monkeypatch.setattr(manager_module.requests, "post", _recording_post(posts))
+    m = _build_manager(
+        tmp_path, {"OnCall": "111"}, _full_schedule("OnCall"), monkeypatch
+    )
+
+    m.send_alert("zone cold", "Site 2", "no_data")
+
+    rows = _read_log(m)
+    assert len(rows) == 1
+    assert rows[0]["alert_alias"] == "no_data"
+    assert rows[0]["site_alias"] == "Site 2"
+    assert rows[0]["message"] == "zone cold"
+    assert rows[0]["state"] == "notified"
+    assert rows[0]["time_received"].isdigit()
+
+    # Duplicates while active do not add new rows.
+    m.send_alert("zone cold", "Site 2", "no_data")
+    assert len(_read_log(m)) == 1
+
+
+def test_csv_marks_acknowledged_on_thumbs_up(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    posts: list[dict[str, Any]] = []
+    monkeypatch.setattr(manager_module.requests, "post", _recording_post(posts))
+    m = _build_manager(
+        tmp_path, {"OnCall": "111"}, _full_schedule("OnCall"), monkeypatch
+    )
+    m.send_alert("zone cold", "beech", "no_data")
+    send = next(iter(m.active_telegram_alerts.values())).sends[0]
+    chat_id, message_id = next(iter(send.message_ids.items()))
+
+    updates = _reaction_update(chat_id=int(chat_id), message_id=message_id, emoji="👍")
+    monkeypatch.setattr(
+        manager_module.requests, "get", lambda url, params: FakeResponse(200, updates)
+    )
+    m.check_telegram_alerts()
+
+    rows = _read_log(m)
+    assert len(rows) == 1
+    assert rows[0]["state"] == "acknowledged"
+
+
+def test_csv_marks_muted_on_thumbs_down(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    posts: list[dict[str, Any]] = []
+    monkeypatch.setattr(manager_module.requests, "post", _recording_post(posts))
+    m = _build_manager(
+        tmp_path, {"OnCall": "111"}, _full_schedule("OnCall"), monkeypatch
+    )
+
+    _ban_via_thumbs_down(m, posts, monkeypatch)
+
+    rows = _read_log(m)
+    assert len(rows) == 1
+    assert rows[0]["state"] == "muted"
+
+
+def test_alerts_history_filters_by_time_range(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = _build_manager(
+        tmp_path, {"OnCall": "111"}, _full_schedule("OnCall"), monkeypatch
+    )
+    m.alert_log.record_notified(100, "a1", "s1", "m1")
+    m.alert_log.record_notified(200, "a2", "s2", "m2")
+    m.alert_log.record_notified(300, "a3", "s3", "m3")
+
+    in_range = m.alerts_history(150, 300)
+    assert [r.time_received for r in in_range] == [200, 300]  # inclusive bounds
+    assert all(isinstance(r.time_received, int) for r in in_range)
+
+    assert len(m.alerts_history(100, 300)) == 3
+    assert m.alerts_history(0, 50) == []  # nothing in range
+
+
+def test_alerts_history_empty_when_no_log(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = _build_manager(
+        tmp_path, {"OnCall": "111"}, _full_schedule("OnCall"), monkeypatch
+    )
+    assert m.alerts_history(0, 9999999999) == []  # no file written yet
+
+
+def test_csv_keeps_at_most_100_rows(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = _build_manager(
+        tmp_path, {"OnCall": "111"}, _full_schedule("OnCall"), monkeypatch
+    )
+    for i in range(150):
+        m.alert_log.record_notified(i, "a", "s", f"m{i}")
+
+    rows = _read_log(m)
+    assert len(rows) == 100  # capped
+    assert rows[0]["time_received"] == "50"  # oldest kept (the first 50 dropped)
+    assert rows[-1]["time_received"] == "149"  # newest kept

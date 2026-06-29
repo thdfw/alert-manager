@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     google_sheets_spreadsheet_id: str = ""
     google_credentials_file: str = "google-credentials.json"
     schedule_file: str = "google-sheet.json"
+    alert_log_file: str = "alerts.csv"
     timezone: str = "America/New_York"
     max_alert_count: int = 6
     escalate_after_count: int = 3
