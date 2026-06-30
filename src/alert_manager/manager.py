@@ -10,7 +10,7 @@ import requests
 from alert_manager.alert_log import AlertLog
 from alert_manager.config import Settings
 from alert_manager.google_sheet_reader import read_google_sheet, schedule_json_path
-from alert_manager.models import Alert, AlertRecord, AlertSend
+from alert_manager.models import Alert, AlertSend, TrackedAlert
 
 
 class AlertManager:
@@ -21,59 +21,40 @@ class AlertManager:
         self.escalate_after_count = settings.escalate_after_count
         self.reminder_interval_seconds = settings.reminder_interval_seconds
         self.alert_log = AlertLog(settings.alert_log_file)
-        self.active_telegram_alerts: dict[str, Alert] = {}
-        # full_aliases a recipient muted with 👎; never re-triggered while listed.
-        # Entries embed today's date, so the set is cleared every 24h (it would
-        # otherwise grow forever with stale, unmatchable aliases).
-        self.banned_alerts: set[str] = set()
+        self.active_telegram_alerts: dict[str, TrackedAlert] = {}
+        self.muted_alerts: set[str] = set()
         self.telegram_update_offset = 0
-        # Guards active_telegram_alerts/banned_alerts against concurrent access
-        # by the /new-alert request threads and the background check loop.
         self._lock = threading.Lock()
 
-    def send_alert(
-        self, message: str, site_alias: str, alert_alias: str, reminder: bool = False
-    ) -> None:
-        full_alias = (
-            f"{pendulum.now(tz=self.timezone_str).format('YYYY-MM-DD')}"
-            f"-{site_alias}-{alert_alias}"
-        )
+    def send_alert(self, alert: Alert, reminder: bool = False) -> None:
+        date_str = pendulum.from_timestamp(
+            alert.time_sent, tz=self.timezone_str
+        ).format("YYYY-MM-DD")
+        full_alias = f"{date_str}-{alert.site_alias}-{alert.alert_alias}"
 
-        newly_received = False
         with self._lock:
-            # A 👎 banned this alias; never re-trigger it (until the daily clear).
-            if full_alias in self.banned_alerts:
-                print(f"Alert {full_alias} is banned; ignoring")
+            if full_alias in self.muted_alerts:
+                print(f"Alert {full_alias} is muted; ignoring")
                 return
-            # A non-reminder (external) alert for an alias that is still active
-            # is a duplicate; reject it cheaply before any Google/Telegram work.
+
             if not reminder and full_alias in self.active_telegram_alerts:
                 print(f"Duplicate alert {full_alias} still active; ignoring")
                 return
+
             if full_alias not in self.active_telegram_alerts:
-                newly_received = True
-                self.active_telegram_alerts[full_alias] = Alert(
-                    message=message,
-                    site_alias=site_alias,
-                    alert_alias=alert_alias,
-                    time_received=int(time.time()),
-                )
+                tracked = TrackedAlert(alert=alert)
+                self.active_telegram_alerts[full_alias] = tracked
+
+                self.alert_log.record(tracked)
             elif self.active_telegram_alerts[full_alias].count < self.max_alert_count:
                 self.active_telegram_alerts[full_alias].count += 1
             else:
                 return
 
-            alert = self.active_telegram_alerts[full_alias]
-            count = alert.count
+            tracked = self.active_telegram_alerts[full_alias]
+            count = tracked.count
 
-        if newly_received:
-            self.alert_log.record_notified(
-                alert.time_received, alert_alias, site_alias, message
-            )
-
-        # Refresh the on-call schedule/contacts cache. A transient Google
-        # failure should not drop the alert, so fall back to the cached JSON.
-        print(f"\n[SENDING ALERT] {message}")
+        print(f"\n[SENDING ALERT] {alert.message}")
         try:
             read_google_sheet(self.settings)
         except Exception as e:
@@ -86,8 +67,9 @@ class AlertManager:
 
         token = self.settings.telegram_bot_token.get_secret_value()
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        telegram_message = f"[{site_alias.capitalize()}] {message}"
+        telegram_message = f"[{alert.site_alias.capitalize()}] {alert.message}"
         sent_message_ids: dict[str, int] = {}
+
         for chat_id in recipients:
             response = requests.post(
                 url, json={"chat_id": chat_id, "text": telegram_message}
@@ -111,6 +93,8 @@ class AlertManager:
                             sent_at=int(time.time()), message_ids=sent_message_ids
                         )
                     )
+                    tracked.state = "sent"
+                    self.alert_log.set_state(tracked)
             count_sent = len(sent_message_ids)
             print(f"Telegram alert {full_alias} sent to {count_sent} recipient(s)")
 
@@ -154,19 +138,17 @@ class AlertManager:
         with self._lock:
             active = list(self.active_telegram_alerts.items())
         if not active:
-            return  # nothing to poll; stay quiet so the fast loop is cheap when idle
+            return
         print(f"\nChecking {len(active)} active alert(s)...")
 
         token = self.settings.telegram_bot_token.get_secret_value()
         url = f"https://api.telegram.org/bot{token}/getUpdates"
-        # message_reaction updates are excluded by default; opt in explicitly.
         params: dict[str, str | int] = {
             "offset": self.telegram_update_offset,
             "timeout": 0,
             "allowed_updates": json.dumps(["message_reaction"]),
         }
         response = requests.get(url, params=params)
-        # (chat_id, message_id) pairs that currently carry 👍 / 👎 reactions.
         thumbed_up: set[tuple[str, int]] = set()
         thumbed_down: set[tuple[str, int]] = set()
         if response.status_code == 200:
@@ -186,56 +168,44 @@ class AlertManager:
                 if "👎" in emojis:
                     thumbed_down.add(key)
 
-        for full_alert_alias, alert in active:
+        for full_alert_alias, tracked in active:
             sent_keys = [
                 (chat_id, message_id)
-                for sent in alert.sends
+                for sent in tracked.sends
                 for chat_id, message_id in sent.message_ids.items()
             ]
-            banned = any(key in thumbed_down for key in sent_keys)
-            acknowledged = banned or any(key in thumbed_up for key in sent_keys)
+            muted = any(key in thumbed_down for key in sent_keys)
+            acknowledged = muted or any(key in thumbed_up for key in sent_keys)
+            alert = tracked.alert
 
-            if banned:
-                print(f"Telegram alert {full_alert_alias} banned (👎)")
+            if muted:
+                print(f"Telegram alert {full_alert_alias} muted (👎)")
+                tracked.state = "muted"
                 with self._lock:
                     self.active_telegram_alerts.pop(full_alert_alias, None)
-                    self.banned_alerts.add(full_alert_alias)
-                self.alert_log.set_state(
-                    alert.time_received, alert.alert_alias, alert.site_alias, "muted"
-                )
+                    self.muted_alerts.add(full_alert_alias)
+                self.alert_log.set_state(tracked)
             elif acknowledged:
                 print(f"Telegram alert {full_alert_alias} acknowledged")
+                tracked.state = "acknowledged"
                 with self._lock:
                     self.active_telegram_alerts.pop(full_alert_alias, None)
-                self.alert_log.set_state(
-                    alert.time_received,
-                    alert.alert_alias,
-                    alert.site_alias,
-                    "acknowledged",
-                )
+                self.alert_log.set_state(tracked)
             else:
-                # Acks are checked every loop, but reminders are rate-limited:
-                # only re-send once reminder_interval_seconds has passed since the
-                # last send (or since the alert was first received).
                 last_activity = (
-                    alert.sends[-1].sent_at if alert.sends else alert.time_received
+                    tracked.sends[-1].sent_at if tracked.sends else alert.time_sent
                 )
                 if int(time.time()) - last_activity >= self.reminder_interval_seconds:
-                    self.send_alert(
-                        alert.message,
-                        alert.site_alias,
-                        alert.alert_alias,
-                        reminder=True,
-                    )
+                    self.send_alert(alert, reminder=True)
 
-    def alerts_history(self, start: int, end: int) -> list[AlertRecord]:
-        """Logged alerts whose time_received falls within [start, end]."""
+    def alerts_history(self, start: int, end: int) -> list[TrackedAlert]:
+        """Logged alerts whose time_sent falls within [start, end]."""
         return self.alert_log.read_between(start, end)
 
-    def clear_banned_alerts(self) -> None:
-        """Drop all banned aliases. Run every 24h: full_aliases embed the date,
+    def clear_muted_alerts(self) -> None:
+        """Drop all muted aliases. Run every 24h: full_aliases embed the date,
         so yesterday's entries can never match again and would only accumulate."""
         with self._lock:
-            count = len(self.banned_alerts)
-            self.banned_alerts.clear()
-        print(f"Cleared {count} banned alert alias(es)")
+            count = len(self.muted_alerts)
+            self.muted_alerts.clear()
+        print(f"Cleared {count} muted alert alias(es)")

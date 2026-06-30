@@ -37,6 +37,14 @@ def schedule_json_path(settings: Settings) -> Path:
     return Path(settings.schedule_file)
 
 
+def write_schedule_cache(settings: Settings, data: OncallData) -> Path:
+    """Write schedule/contacts to the local JSON cache, creating the file and parent dirs if needed."""
+    path = schedule_json_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def parse_hour_start(value: str) -> int:
     hour_part = value.strip().split(":", maxsplit=1)[0]
     return int(hour_part)
@@ -131,8 +139,7 @@ def read_google_sheet(settings: Settings) -> OncallData:
         ),
     }
 
-    path = schedule_json_path(settings)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    path = write_schedule_cache(settings, data)
     print(f"Saved schedule and {len(data['contacts'])} contacts to {path}")
     return data
 

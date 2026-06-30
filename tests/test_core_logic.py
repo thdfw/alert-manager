@@ -6,6 +6,7 @@ All Telegram and Google calls are mocked, so these exercise the ported logic
 
 import csv
 import json
+import time
 from typing import Any
 
 import pytest
@@ -14,6 +15,7 @@ from pydantic import SecretStr
 from alert_manager import manager as manager_module
 from alert_manager.config import Settings
 from alert_manager.manager import AlertManager
+from alert_manager.models import Alert, TrackedAlert
 
 
 class FakeResponse:
@@ -31,6 +33,20 @@ class FakeResponse:
 def _full_schedule(name: str) -> dict[str, dict[str, list[str]]]:
     """On-call schedule with ``name`` covering every weekday and hour."""
     return {str(d): {str(h): [name] for h in range(24)} for d in range(7)}
+
+
+def _alert(
+    message: str = "zone cold",
+    site_alias: str = "beech",
+    alert_alias: str = "no_data",
+    time_sent: int | None = None,
+) -> Alert:
+    return Alert(
+        message=message,
+        site_alias=site_alias,
+        alert_alias=alert_alias,
+        time_sent=time_sent if time_sent is not None else int(time.time()),
+    )
 
 
 def _build_manager(
@@ -97,7 +113,7 @@ def test_duplicate_external_alert_while_active_is_rejected(
 
     # First external alert is sent; later identical ones are rejected while active.
     for _ in range(5):
-        m.send_alert("zone cold", "beech", "no_data")
+        m.send_alert(_alert())
 
     assert len(m.active_telegram_alerts) == 1
     alert = next(iter(m.active_telegram_alerts.values()))
@@ -114,9 +130,9 @@ def test_reminders_increment_count_and_cap_at_six(
         tmp_path, {"Thomas": "111"}, _full_schedule("Thomas"), monkeypatch
     )
 
-    m.send_alert("zone cold", "beech", "no_data")  # external: count 1
+    m.send_alert(_alert())  # external: count 1
     for _ in range(10):
-        m.send_alert("zone cold", "beech", "no_data", reminder=True)
+        m.send_alert(_alert(), reminder=True)
 
     assert len(m.active_telegram_alerts) == 1
     alert = next(iter(m.active_telegram_alerts.values()))
@@ -137,9 +153,9 @@ def test_reminders_escalate_to_all_contacts_after_three(
         monkeypatch,
     )
 
-    m.send_alert("zone cold", "beech", "no_data")  # count 1: on-call
+    m.send_alert(_alert())  # count 1: on-call
     for _ in range(3):  # reminders -> counts 2, 3, 4
-        m.send_alert("zone cold", "beech", "no_data", reminder=True)
+        m.send_alert(_alert(), reminder=True)
 
     chat_ids = [p["chat_id"] for p in posts]
     assert chat_ids[:3] == ["111", "111", "111"]  # counts 1-3: on-call only
@@ -154,7 +170,7 @@ def test_thumbs_up_reaction_acknowledges(
     m = _build_manager(
         tmp_path, {"OnCall": "111"}, _full_schedule("OnCall"), monkeypatch
     )
-    m.send_alert("zone cold", "beech", "no_data")
+    m.send_alert(_alert())
     send = next(iter(m.active_telegram_alerts.values())).sends[0]
     chat_id, message_id = next(iter(send.message_ids.items()))
 
@@ -176,7 +192,7 @@ def test_non_thumbs_up_reaction_does_not_acknowledge(
         tmp_path, {"OnCall": "111"}, _full_schedule("OnCall"), monkeypatch
     )
     m.reminder_interval_seconds = 0  # don't rate-limit the re-send for this test
-    m.send_alert("zone cold", "beech", "no_data")
+    m.send_alert(_alert())
     send = next(iter(m.active_telegram_alerts.values())).sends[0]
     chat_id, message_id = next(iter(send.message_ids.items()))
 
@@ -206,7 +222,7 @@ def test_reminder_is_rate_limited_within_interval(
         tmp_path, {"OnCall": "111"}, _full_schedule("OnCall"), monkeypatch
     )
     m.reminder_interval_seconds = 300  # default cadence
-    m.send_alert("zone cold", "beech", "no_data")
+    m.send_alert(_alert())
 
     # A check moments later (no reaction) detects acks but must NOT re-send yet.
     m.check_telegram_alerts()
@@ -224,7 +240,7 @@ def test_thumbs_up_on_different_message_does_not_acknowledge(
     m = _build_manager(
         tmp_path, {"OnCall": "111"}, _full_schedule("OnCall"), monkeypatch
     )
-    m.send_alert("zone cold", "beech", "no_data")
+    m.send_alert(_alert())
     send = next(iter(m.active_telegram_alerts.values())).sends[0]
     chat_id, message_id = next(iter(send.message_ids.items()))
 
@@ -240,11 +256,11 @@ def test_thumbs_up_on_different_message_does_not_acknowledge(
     assert len(m.active_telegram_alerts) == 1  # still active
 
 
-def _ban_via_thumbs_down(
+def _mute_via_thumbs_down(
     m: AlertManager, posts: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
 ) -> str:
-    """Send an alert, 👎 it, run a check, and return the banned full_alias."""
-    m.send_alert("zone cold", "beech", "no_data")
+    """Send an alert, 👎 it, run a check, and return the muted full_alias."""
+    m.send_alert(_alert())
     full_alias = next(iter(m.active_telegram_alerts.keys()))
     send = m.active_telegram_alerts[full_alias].sends[0]
     chat_id, message_id = next(iter(send.message_ids.items()))
@@ -256,7 +272,7 @@ def _ban_via_thumbs_down(
     return full_alias
 
 
-def test_thumbs_down_bans_and_blocks_future_alerts(
+def test_thumbs_down_mutes_and_blocks_future_alerts(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     posts: list[dict[str, Any]] = []
@@ -265,18 +281,18 @@ def test_thumbs_down_bans_and_blocks_future_alerts(
         tmp_path, {"OnCall": "111"}, _full_schedule("OnCall"), monkeypatch
     )
 
-    full_alias = _ban_via_thumbs_down(m, posts, monkeypatch)
+    full_alias = _mute_via_thumbs_down(m, posts, monkeypatch)
 
     assert m.active_telegram_alerts == {}  # 👎 cleared it
-    assert full_alias in m.banned_alerts  # and banned the alias
+    assert full_alias in m.muted_alerts  # and muted the alias
 
     posts_before = len(posts)
-    m.send_alert("zone cold", "beech", "no_data")  # new external attempt
+    m.send_alert(_alert())  # new external attempt
     assert len(posts) == posts_before  # nothing sent
     assert m.active_telegram_alerts == {}  # not re-tracked
 
 
-def test_clear_banned_alerts_allows_retrigger(
+def test_clear_muted_alerts_allows_retrigger(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     posts: list[dict[str, Any]] = []
@@ -285,13 +301,13 @@ def test_clear_banned_alerts_allows_retrigger(
         tmp_path, {"OnCall": "111"}, _full_schedule("OnCall"), monkeypatch
     )
 
-    _ban_via_thumbs_down(m, posts, monkeypatch)
-    assert m.banned_alerts
+    _mute_via_thumbs_down(m, posts, monkeypatch)
+    assert m.muted_alerts
 
-    m.clear_banned_alerts()
-    assert m.banned_alerts == set()
+    m.clear_muted_alerts()
+    assert m.muted_alerts == set()
 
-    m.send_alert("zone cold", "beech", "no_data")  # allowed again
+    m.send_alert(_alert())  # allowed again
     assert len(m.active_telegram_alerts) == 1
 
 
@@ -300,7 +316,7 @@ def _read_log(m: AlertManager) -> list[dict[str, str]]:
         return list(csv.DictReader(f))
 
 
-def test_csv_logs_notified_row_once_per_alert(
+def test_csv_logs_row_once_per_alert(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     posts: list[dict[str, Any]] = []
@@ -309,18 +325,18 @@ def test_csv_logs_notified_row_once_per_alert(
         tmp_path, {"OnCall": "111"}, _full_schedule("OnCall"), monkeypatch
     )
 
-    m.send_alert("zone cold", "Site 2", "no_data")
+    m.send_alert(_alert(site_alias="Site 2"))
 
     rows = _read_log(m)
     assert len(rows) == 1
     assert rows[0]["alert_alias"] == "no_data"
     assert rows[0]["site_alias"] == "Site 2"
     assert rows[0]["message"] == "zone cold"
-    assert rows[0]["state"] == "notified"
-    assert rows[0]["time_received"].isdigit()
+    assert rows[0]["state"] == "sent"
+    assert rows[0]["time_sent"].isdigit()
 
     # Duplicates while active do not add new rows.
-    m.send_alert("zone cold", "Site 2", "no_data")
+    m.send_alert(_alert(site_alias="Site 2"))
     assert len(_read_log(m)) == 1
 
 
@@ -332,7 +348,7 @@ def test_csv_marks_acknowledged_on_thumbs_up(
     m = _build_manager(
         tmp_path, {"OnCall": "111"}, _full_schedule("OnCall"), monkeypatch
     )
-    m.send_alert("zone cold", "beech", "no_data")
+    m.send_alert(_alert())
     send = next(iter(m.active_telegram_alerts.values())).sends[0]
     chat_id, message_id = next(iter(send.message_ids.items()))
 
@@ -356,7 +372,7 @@ def test_csv_marks_muted_on_thumbs_down(
         tmp_path, {"OnCall": "111"}, _full_schedule("OnCall"), monkeypatch
     )
 
-    _ban_via_thumbs_down(m, posts, monkeypatch)
+    _mute_via_thumbs_down(m, posts, monkeypatch)
 
     rows = _read_log(m)
     assert len(rows) == 1
@@ -369,13 +385,19 @@ def test_alerts_history_filters_by_time_range(
     m = _build_manager(
         tmp_path, {"OnCall": "111"}, _full_schedule("OnCall"), monkeypatch
     )
-    m.alert_log.record_notified(100, "a1", "s1", "m1")
-    m.alert_log.record_notified(200, "a2", "s2", "m2")
-    m.alert_log.record_notified(300, "a3", "s3", "m3")
+    m.alert_log.record(
+        TrackedAlert(alert=Alert(message="m1", site_alias="s1", alert_alias="a1", time_sent=100))
+    )
+    m.alert_log.record(
+        TrackedAlert(alert=Alert(message="m2", site_alias="s2", alert_alias="a2", time_sent=200))
+    )
+    m.alert_log.record(
+        TrackedAlert(alert=Alert(message="m3", site_alias="s3", alert_alias="a3", time_sent=300))
+    )
 
     in_range = m.alerts_history(150, 300)
-    assert [r.time_received for r in in_range] == [200, 300]  # inclusive bounds
-    assert all(isinstance(r.time_received, int) for r in in_range)
+    assert [r.alert.time_sent for r in in_range] == [200, 300]  # inclusive bounds
+    assert all(isinstance(r.alert.time_sent, int) for r in in_range)
 
     assert len(m.alerts_history(100, 300)) == 3
     assert m.alerts_history(0, 50) == []  # nothing in range
@@ -397,9 +419,13 @@ def test_csv_keeps_at_most_100_rows(
         tmp_path, {"OnCall": "111"}, _full_schedule("OnCall"), monkeypatch
     )
     for i in range(150):
-        m.alert_log.record_notified(i, "a", "s", f"m{i}")
+        m.alert_log.record(
+            TrackedAlert(
+                alert=Alert(message=f"m{i}", site_alias="s", alert_alias="a", time_sent=i)
+            )
+        )
 
     rows = _read_log(m)
     assert len(rows) == 100  # capped
-    assert rows[0]["time_received"] == "50"  # oldest kept (the first 50 dropped)
-    assert rows[-1]["time_received"] == "149"  # newest kept
+    assert rows[0]["time_sent"] == "50"  # oldest kept (the first 50 dropped)
+    assert rows[-1]["time_sent"] == "149"  # newest kept

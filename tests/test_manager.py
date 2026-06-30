@@ -9,8 +9,9 @@ from pydantic import SecretStr
 
 from alert_manager import app as app_module
 from alert_manager.config import Settings
+from alert_manager.google_sheet_reader import write_schedule_cache
 from alert_manager.manager import AlertManager
-from alert_manager.models import NewAlert
+from alert_manager.models import Alert
 
 
 def _manager_with_sheet(tmp_path: Path, oncall: dict[str, object]) -> AlertManager:
@@ -44,11 +45,26 @@ def test_missing_schedule_returns_empty(tmp_path: Path) -> None:
     assert manager.get_alert_recipients(alert_count=99) == []
 
 
-def test_new_alert_model_fields() -> None:
-    alert = NewAlert(message="m", site_alias="beech", alert_alias="no_data")
+def test_write_schedule_cache_creates_missing_file_and_parents(tmp_path: Path) -> None:
+    path = tmp_path / "nested" / "google-sheet.json"
+    settings = Settings(schedule_file=str(path))
+    data = {"schedule": {}, "contacts": {"OnCall": "111"}}
+
+    written = write_schedule_cache(settings, data)
+
+    assert written == path
+    assert path.exists()
+    assert json.loads(path.read_text(encoding="utf-8")) == data
+
+
+def test_alert_model_fields() -> None:
+    alert = Alert(
+        message="m", site_alias="beech", alert_alias="no_data", time_sent=1700000000
+    )
     assert alert.message == "m"
     assert alert.site_alias == "beech"
     assert alert.alert_alias == "no_data"
+    assert alert.time_sent == 1700000000
 
 
 def test_require_token_enforced_when_set(monkeypatch: pytest.MonkeyPatch) -> None:

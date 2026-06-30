@@ -29,7 +29,7 @@ Query parameters (both required):
 - `start` — start of the window, unix time in seconds (inclusive).
 - `end` — end of the window, unix time in seconds (inclusive).
 
-It returns a JSON array of alerts whose `time_received` falls within `[start, end]`, oldest first. Each entry has `time_received`, `alert_alias`, `site_alias`, `message`, and `state` (`notified`, `acknowledged`, or `muted`). The window is matched against `time_received`, so an alert is included based on when it first arrived, regardless of when it was later acknowledged. Auth is the same bearer token as `/new-alert`; both `start` and `end` are required, so a missing one returns `422`.
+It returns a JSON array of tracked alerts whose `alert.time_sent` falls within `[start, end]`, oldest first. Each entry is a `TrackedAlert` with `count`, `sends`, `alert` (`message`, `site_alias`, `alert_alias`, `time_sent`), and `state` (`processed`, `sent`, `acknowledged`, or `muted`). The window is matched against `time_sent`, so an alert is included based on when it was sent, regardless of when it was later acknowledged. Auth is the same bearer token as `/new-alert`; both `start` and `end` are required, so a missing one returns `422`.
 
 Example — all alerts from the last 24 hours (using `date` to build the unix timestamps):
 
@@ -39,7 +39,7 @@ curl -H "Authorization: Bearer $ALERT_MANAGER_API_TOKEN" \
 ```
 
 ```json
-[{ "time_received": 1735700000, "alert_alias": "no_data", "site_alias": "Site 2", "message": "No data in the last 2 hours", "state": "acknowledged" }]
+[{ "count": 1, "sends": [], "alert": { "message": "No data in the last 2 hours", "site_alias": "Site 2", "alert_alias": "no_data", "time_sent": 1735700000 }, "state": "acknowledged" }]
 ```
 
 ### `GET /health`
@@ -60,11 +60,11 @@ When no alerts are active the loop still ticks but does nothing (no Telegram cal
 
 **Acknowledgement (👍).** An alert is acknowledged when a recipient reacts with 👍 to the alert message. Acknowledged alerts are dropped.
 
-**Mute (👎).** A 👎 reaction also drops the alert and additionally **bans** its alias: any later alert with the same `site_alias` + `alert_alias` *that day* is ignored. The ban list is cleared every `ALERT_MANAGER_BAN_CLEAR_INTERVAL_SECONDS` (default 24h) — enough, since the alias includes the date.
+**Mute (👎).** A 👎 reaction also drops the alert and additionally **mutes** its alias: any later alert with the same `site_alias` + `alert_alias` *that day* is ignored. The mute list is cleared every `ALERT_MANAGER_MUTE_CLEAR_INTERVAL_SECONDS` (default 24h) — enough, since the alias includes the date.
 
 **Idempotency.** While an alert is active, a repeat `/new-alert` with the same `site_alias` + `alert_alias` (same day) is ignored. Re-sends and escalation are driven internally, never by repeat posts.
 
-**Audit log.** Every alert is appended as one row to a local CSV (`ALERT_MANAGER_ALERT_LOG_FILE`, default `alerts.csv`) with columns `time_received`, `alert_alias`, `site_alias`, `message`, `state`. The `state` starts at `notified` and is updated to `acknowledged` (👍) or `muted` (👎) when the reaction is read.
+**Audit log.** Every alert is appended as one row to a local CSV (`ALERT_MANAGER_ALERT_LOG_FILE`, default `alerts.csv`) with columns `time_sent`, `site_alias`, `alert_alias`, `message`, `state`. The `state` starts at `processed` when the alert is accepted, becomes `sent` once Telegram delivery succeeds, and is updated to `acknowledged` (👍) or `muted` (👎) when the reaction is read.
 
 ## Configuration
 
@@ -83,7 +83,7 @@ Copy `.env.example` to `.env` and fill it in. All variables use the `ALERT_MANAG
 | `ALERT_MANAGER_REMINDER_INTERVAL_SECONDS` | `300` | Minimum time between re-sends of an unacknowledged alert |
 | `ALERT_MANAGER_MAX_ALERT_COUNT` | `6` | Max sends per alert |
 | `ALERT_MANAGER_ESCALATE_AFTER_COUNT` | `3` | Escalate to all contacts once the count exceeds this |
-| `ALERT_MANAGER_BAN_CLEAR_INTERVAL_SECONDS` | `86400` | How often the 👎-ban list is cleared |
+| `ALERT_MANAGER_MUTE_CLEAR_INTERVAL_SECONDS` | `86400` | How often the 👎-mute list is cleared |
 | `ALERT_MANAGER_HOST` / `ALERT_MANAGER_PORT` | `0.0.0.0` / `8000` | Bind address |
 
 ## Run
