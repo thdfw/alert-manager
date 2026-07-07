@@ -195,6 +195,10 @@ class AlertManager:
                 last_activity = (
                     tracked.sends[-1].sent_at if tracked.sends else alert.time_sent
                 )
+                print(
+                    f"Time since last activity: {int(time.time()) - last_activity} seconds, "
+                    f"reminder interval: {self.reminder_interval_seconds} seconds"
+                )
                 if int(time.time()) - last_activity >= self.reminder_interval_seconds:
                     self.send_alert(alert, reminder=True)
 
