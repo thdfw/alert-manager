@@ -412,6 +412,26 @@ def test_alerts_history_empty_when_no_log(
     assert m.alerts_history(0, 9999999999) == []  # no file written yet
 
 
+def test_alerts_history_reads_legacy_time_received_column(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = _build_manager(
+        tmp_path, {"OnCall": "111"}, _full_schedule("OnCall"), monkeypatch
+    )
+    legacy_csv = tmp_path / "alerts.csv"
+    legacy_csv.write_text(
+        "time_received,alert_alias,site_alias,message,state\n"
+        "1782736416,no_data,spruce,No data found in the last 10 minutes,acknowledged\n"
+        "1782736664,no_data,spruce,No data found in the last 10 minutes,muted\n",
+        encoding="utf-8",
+    )
+    m.alert_log.path = legacy_csv
+
+    results = m.alerts_history(1781965366, 1782829366)
+    assert len(results) == 2
+    assert [r.alert.time_sent for r in results] == [1782736416, 1782736664]
+
+
 def test_csv_keeps_at_most_100_rows(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
