@@ -48,17 +48,17 @@ Returns `{"status": "ok", "active_alerts": <n>}`. No auth.
 
 ## How it works
 
-**Recipients.** The on-call schedule and contacts live in a Google Sheet (`Schedule` and `Contacts` worksheets), cached locally to `google-sheet.json` and refreshed on each send. The recipient is whoever is on call for the current weekday and hour.
+**Recipients.** The on-call schedule and contacts live in a Google Sheet that is read on each send. The recipient is whoever is on call for the current weekday and hour.
 
 **Tracking and escalation.** While any alert is active, a background loop runs every `ALERT_MANAGER_CHECK_INTERVAL_SECONDS` (default 30s) to check for acknowledgements quickly. Re-sending is separate and slower: an unacknowledged alert is only re-sent once `ALERT_MANAGER_REMINDER_INTERVAL_SECONDS` (default 5 min) has passed since its last send. Each re-send bumps a per-alert counter:
 
-- counts 1–`ALERT_MANAGER_ESCALATE_AFTER_COUNT` (default 3): on-call recipient only,
+- from 1 to `ALERT_MANAGER_ESCALATE_AFTER_COUNT` (default 3): on-call recipient only,
 - above that: escalates to **all** contacts,
 - stops after `ALERT_MANAGER_MAX_ALERT_COUNT` (default 6) sends (the alert stays tracked so a late acknowledgement is still honored).
 
 When no alerts are active the loop still ticks but does nothing (no Telegram calls), so the fast interval is cheap.
 
-**Acknowledgement (👍).** An alert is acknowledged when a recipient reacts with 👍 to the alert message. Acknowledged alerts are dropped.
+**Acknowledgement (👍).** An alert is acknowledged when a recipient reacts with 👍 to the alert message. Acknowledged alerts are dropped from the alert manager completely.
 
 **Mute (👎).** A 👎 reaction also drops the alert and additionally **mutes** its alias: any later alert with the same `site_alias` + `alert_alias` *that day* is ignored. The mute list is cleared every `ALERT_MANAGER_MUTE_CLEAR_INTERVAL_SECONDS` (default 24h) — enough, since the alias includes the date.
 
@@ -85,6 +85,33 @@ Copy `.env.example` to `.env` and fill it in. All variables use the `ALERT_MANAG
 | `ALERT_MANAGER_ESCALATE_AFTER_COUNT` | `3` | Escalate to all contacts once the count exceeds this |
 | `ALERT_MANAGER_MUTE_CLEAR_INTERVAL_SECONDS` | `86400` | How often the 👎-mute list is cleared |
 | `ALERT_MANAGER_HOST` / `ALERT_MANAGER_PORT` | `0.0.0.0` / `8000` | Bind address |
+
+## Google Sheets on-call setup
+
+The spreadsheet configured in `ALERT_MANAGER_GOOGLE_SHEETS_SPREADSHEET_ID` must have two worksheets named **`Schedule`** and **`Contacts`**. The service account from `google-credentials.json` needs read-only access to the spreadsheet (Share → add the service-account email as Viewer).
+
+### Add a contact
+
+On the **`Contacts`** worksheet, add a row with these columns (header names are case-insensitive):
+
+| Name | Telegram chat id |
+|------|------------------|
+| Alice | `123456789` |
+
+- **Name** — short label used in the schedule. Must match exactly in `Schedule` cells (including spelling and capitalization).
+- **Telegram chat id** — numeric ID for the person's DM with the alert bot. Before they can receive alerts, they must open Telegram, search for **@GridWorksAlertsBot**, tap **Start**, and send any message to open the chat. To find the ID, forward that message to **@ShowJsonBot** and read the `chat.id` field from the JSON it replies with.
+
+Rows without a chat ID are ignored.
+
+### Assign on-call hours
+
+On the **`Schedule`** worksheet:
+
+- Row 1: day names in columns B onward (`monday`, `tuesday`, … — case-insensitive).
+- Column A: hour labels for each row (`0:00`, `1:00`, … `23:00`). Only the hour before the colon is used.
+- Each cell: one or more contact names, comma-separated if several people share a slot (e.g. `Alice` or `Alice, Bob`).
+
+On-call lookup uses `ALERT_MANAGER_TIMEZONE` (default `America/New_York`): weekday and hour at alert time determine which name(s) receive the message.
 
 ## Run
 
